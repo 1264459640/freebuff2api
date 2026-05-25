@@ -1,6 +1,6 @@
 services:
   freebuff2api:
-    build: .
+    image: ghcr.io/1264459640/freebuff2api:latest
     ports:
       - "8000:8000"
     env_file:

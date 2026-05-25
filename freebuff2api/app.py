@@ -263,6 +263,28 @@ async def _collect_completion(
         await _finalize_run_with_client(client, run, message_id)
 
 
+async def _start_child_chat_run_chain(
+    client: CodebuffClient,
+    model: FreebuffModel,
+) -> FreebuffRun:
+    parent_agent_id = model.parent_agent_id
+    assert parent_agent_id is not None
+    started_at = utc_now_iso()
+    parent_run_id = await client.start_run(parent_agent_id)
+    chat_started_at = utc_now_iso()
+    chat_run_id = await client.start_run(
+        model.agent_id,
+        ancestor_run_ids=[parent_run_id],
+    )
+    return FreebuffRun(
+        run_id=parent_run_id,
+        agent_id=parent_agent_id,
+        started_at=started_at,
+        chat_run_id=chat_run_id,
+        chat_started_at=chat_started_at,
+    )
+
+
 async def _start_freebuff_run_chain(
     client: CodebuffClient,
     model: FreebuffModel | str,
