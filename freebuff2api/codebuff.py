@@ -13,7 +13,6 @@ from .config import Settings
 from .logging_config import redact_headers, render_debug
 from .models import agent_validation_payload
 
-
 logger = logging.getLogger("freebuff2api.codebuff")
 
 
@@ -44,8 +43,9 @@ class FreebuffRun:
 
 
 class CodebuffClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, token: str | None = None) -> None:
         self.settings = settings
+        self._token = token
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.request_timeout, read=None),
             follow_redirects=True,
@@ -64,7 +64,8 @@ class CodebuffClient:
         require_auth: bool = True,
         extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        if require_auth and not self.settings.codebuff_token:
+        token = self._token or self.settings.codebuff_token
+        if require_auth and not token:
             raise CodebuffError("FREEBUFF_TOKEN or CODEBUFF_TOKEN is required", 500)
 
         headers = {
@@ -72,7 +73,7 @@ class CodebuffClient:
             "User-Agent": user_agent,
         }
         if require_auth:
-            headers["Authorization"] = f"Bearer {self.settings.codebuff_token}"
+            headers["Authorization"] = f"Bearer {token}"
         if json_body:
             headers["Content-Type"] = "application/json"
         if extra:
@@ -113,9 +114,20 @@ class CodebuffClient:
                 f"Codebuff request failed: {response.status_code} {response.text[:500]}",
                 502,
             )
-        if not response.content:
+        # 1. 过滤掉完全为空、或者全是空格的响应
+        if not response.content or not response.content.strip():
             return {}
-        return response.json()
+
+        # 2. 安全解析 JSON，且强制要求必须是字典格式 (dict)
+        try:
+            data = response.json()
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+        # 3. 兜底返回空字典，防止上一级静态检查报错，也防止业务代码报错
+        return {}
 
     async def validate_agents(self) -> None:
         if self._agents_validated:
@@ -235,9 +247,34 @@ class CodebuffClient:
         messages: list[dict[str, Any]] | None = None,
         surface: str | None = None,
     ) -> dict[str, Any]:
+        # 1. 预处理 messages，将数组类型的 content 转换为 string
+        cleaned_messages = []
+        if messages:
+            for msg in messages:
+                # 浅拷贝字典，避免修改原始请求体而影响后续的对话调用
+                msg_copy = dict(msg)
+                content = msg_copy.get("content")
+                if isinstance(content, list):
+                    # 如果 content 是数组（多模态格式，如 [{"type": "text", "text": "..."}]）
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            text_val = part.get("text")
+                            if isinstance(text_val, str):
+                                text_parts.append(text_val)
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    msg_copy["content"] = "".join(text_parts)
+                elif not isinstance(content, str) and content is not None:
+                    # 如果是其他非 string 的格式，强制转换为 string
+                    msg_copy["content"] = str(content)
+
+                    cleaned_messages.append(msg_copy)
+
+        # 2. 构造请求体，使用清洗后的 cleaned_messages
         body = {
             "provider": provider,
-            "messages": messages or [],
+            "messages": cleaned_messages,
             "sessionId": self.settings.session_id,
             "device": {
                 "os": self.settings.os_name,
@@ -248,15 +285,15 @@ class CodebuffClient:
         }
         if surface:
             body["surface"] = surface
-        return await self._json(
-            "POST",
-            "/api/v1/ads",
-            body=body,
-            headers=self._headers(
-                json_body=True,
-                user_agent="Freebuff-CLI/0.0.95",
-            ),
-        )
+            return await self._json(
+                "POST",
+                "/api/v1/ads",
+                body=body,
+                headers=self._headers(
+                    json_body=True,
+                    user_agent="Freebuff-CLI/0.0.95",
+                ),
+            )
 
     async def request_ad_chain(
         self,
@@ -270,7 +307,13 @@ class CodebuffClient:
                 messages=messages,
                 surface=surface,
             )
-            ads = ads_data.get("ads") or []
+
+            # === 修改此处：增加防御性判空与类型校验 ===
+            if ads_data and isinstance(ads_data, dict):
+                ads = ads_data.get("ads") or []
+            else:
+                ads = []
+
             ad = ads[0] if ads else None
             logger.info(
                 "ads provider=%s messages=%s count=%s selected=%s",
@@ -281,9 +324,7 @@ class CodebuffClient:
             )
             if not ad:
                 continue
-            await self.report_zeroclick_impressions(
-                list(ad.get("impressionIds") or [])
-            )
+            await self.report_zeroclick_impressions(list(ad.get("impressionIds") or []))
             await self.report_codebuff_impression(ad.get("impUrl") or "")
             return
 
@@ -556,10 +597,41 @@ class SessionManager:
         return None
 
 
+@dataclass
+class TokenSlot:
+    client: CodebuffClient
+    sessions: SessionManager
+
+
+class TokenPool:
+    def __init__(self, tokens: tuple[str, ...], settings: Settings) -> None:
+        self._slots: list[TokenSlot] = []
+        for token in tokens:
+            client = CodebuffClient(settings, token=token)
+            sessions = SessionManager(client, settings)
+            self._slots.append(TokenSlot(client=client, sessions=sessions))
+        self._next = 0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> TokenSlot:
+        async with self._lock:
+            slot = self._slots[self._next]
+            self._next = (self._next + 1) % len(self._slots)
+            return slot
+
+    async def aclose(self) -> None:
+        for slot in self._slots:
+            await slot.client.aclose()
+
+
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00",
-        "Z",
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace(
+            "+00:00",
+            "Z",
+        )
     )
 
 

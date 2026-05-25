@@ -13,7 +13,7 @@ from .codebuff import (
     CodebuffClient,
     CodebuffError,
     FreebuffRun,
-    SessionManager,
+    TokenPool,
     utc_now_iso,
 )
 from .config import Settings, load_settings
@@ -34,14 +34,13 @@ logger = logging.getLogger("freebuff2api.app")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = load_settings()
     configure_logging(settings)
-    client = CodebuffClient(settings)
+    pool = TokenPool(settings.codebuff_tokens, settings)
     app.state.settings = settings
-    app.state.codebuff = client
-    app.state.sessions = SessionManager(client, settings)
+    app.state.pool = pool
     try:
         yield
     finally:
-        await client.aclose()
+        await pool.aclose()
 
 
 app = FastAPI(title="freebuff2api", version="0.1.0", lifespan=lifespan)
@@ -49,14 +48,6 @@ app = FastAPI(title="freebuff2api", version="0.1.0", lifespan=lifespan)
 
 def _settings(request: Request) -> Settings:
     return request.app.state.settings
-
-
-def _client(request: Request) -> CodebuffClient:
-    return request.app.state.codebuff
-
-
-def _sessions(request: Request) -> SessionManager:
-    return request.app.state.sessions
 
 
 def _check_local_auth(request: Request) -> None:
@@ -121,14 +112,19 @@ async def chat_completions(request: Request) -> Any:
             render_debug(body, settings.log_body_chars),
         )
 
+    pool = request.app.state.pool
+    slot = await pool.acquire()
+    client = slot.client
+    sessions = slot.sessions
+
     try:
-        session = await _sessions(request).ensure_session(
+        session = await sessions.ensure_session(
             model,
             messages=body.get("messages"),
         )
-        await _client(request).validate_agents()
-        await _client(request).request_ad_chain(messages=body.get("messages"))
-        run = await _start_freebuff_run_chain(_client(request), model_config.agent_id)
+        await client.validate_agents()
+        await client.request_ad_chain(messages=body.get("messages"))
+        run = await _start_freebuff_run_chain(client, model_config.agent_id)
         trace_session_id = str(uuid.uuid4())
         payload = build_upstream_payload(
             body,
@@ -150,7 +146,7 @@ async def chat_completions(request: Request) -> Any:
 
     if body.get("stream") is True:
         return StreamingResponse(
-            _stream_openai_chunks(request, payload, run),
+            _stream_openai_chunks(client, settings, payload, run),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
@@ -160,20 +156,19 @@ async def chat_completions(request: Request) -> Any:
         )
 
     try:
-        response = await _collect_completion(request, payload, run, model)
+        response = await _collect_completion(client, settings, payload, run, model)
         return JSONResponse(response)
     except Exception as error:
         return _error_response(error)
 
 
 async def _stream_openai_chunks(
-    request: Request,
+    client: CodebuffClient,
+    settings: Settings,
     payload: dict[str, Any],
     run: FreebuffRun,
 ) -> AsyncIterator[bytes]:
     message_id: str | None = None
-    client = _client(request)
-    settings = _settings(request)
     try:
         async for line in client.chat_events(payload):
             data = decode_sse_data(line)
@@ -208,7 +203,8 @@ async def _stream_openai_chunks(
 
 
 async def _collect_completion(
-    request: Request,
+    client: CodebuffClient,
+    settings: Settings,
     payload: dict[str, Any],
     run: FreebuffRun,
     model: str,
@@ -216,7 +212,7 @@ async def _collect_completion(
     message_id: str | None = None
     accumulator = CompletionAccumulator(model)
     try:
-        async for line in _client(request).chat_events(payload):
+        async for line in client.chat_events(payload):
             data = decode_sse_data(line)
             if data is None:
                 continue
@@ -232,14 +228,14 @@ async def _collect_completion(
             len(response["choices"][0]["message"].get("content") or ""),
             response["choices"][0].get("finish_reason"),
         )
-        if _settings(request).debug:
+        if settings.debug:
             logger.debug(
                 "chat completion response body=%s",
-                render_debug(response, _settings(request).log_body_chars),
+                render_debug(response, settings.log_body_chars),
             )
         return response
     finally:
-        await _finalize_run(request, run, message_id)
+        await _finalize_run_with_client(client, run, message_id)
 
 
 async def _start_freebuff_run_chain(
@@ -274,14 +270,6 @@ async def _start_freebuff_run_chain(
         started_at=started_at,
         child_run_id=child_run_id,
     )
-
-
-async def _finalize_run(
-    request: Request,
-    run: FreebuffRun,
-    message_id: str | None,
-) -> None:
-    await _finalize_run_with_client(_client(request), run, message_id)
 
 
 def _schedule_finalize_run(

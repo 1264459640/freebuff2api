@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from freebuff2api.app import _start_freebuff_run_chain, _stream_openai_chunks
 from freebuff2api.codebuff import FreebuffRun
-from freebuff2api.config import Settings
 
 
 class FakeClient:
@@ -43,18 +42,7 @@ class FakeClient:
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_forwards_content_before_finalize(self) -> None:
         client = FakeClient()
-        request = SimpleNamespace(
-            app=SimpleNamespace(
-                state=SimpleNamespace(
-                    codebuff=client,
-                    settings=Settings(
-                        codebuff_token="token",
-                        local_api_key=None,
-                        debug=False,
-                    ),
-                )
-            )
-        )
+        settings = SimpleNamespace(debug=False, log_body_chars=2000)
 
         chunks = []
         run = FreebuffRun(
@@ -62,7 +50,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             agent_id="base2-free-deepseek-flash",
             started_at="2026-05-23T00:00:00.000Z",
         )
-        async for chunk in _stream_openai_chunks(request, {}, run):
+        async for chunk in _stream_openai_chunks(client, settings, {}, run):
             chunks.append(chunk.decode("utf-8"))
 
         first_payload = json.loads(chunks[0].removeprefix("data: ").strip())

@@ -12,8 +12,8 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
-    codebuff_token: str | None
-    local_api_key: str | None
+    codebuff_tokens: tuple[str, ...] = ()
+    local_api_key: str | None = None
     codebuff_base_url: str = "https://www.codebuff.com"
     zeroclick_base_url: str = "https://zeroclick.dev"
     session_id: str = ""
@@ -32,6 +32,12 @@ class Settings:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     )
+
+    @property
+    def codebuff_token(self) -> str | None:
+        if self.codebuff_tokens:
+            return self.codebuff_tokens[0]
+        return None
 
     @property
     def codebuff_api_url(self) -> str:
@@ -65,8 +71,13 @@ def load_settings() -> Settings:
     debug = _bool("FREEBUFF_DEBUG", False)
     log_level = "DEBUG" if debug else os.getenv("FREEBUFF_LOG_LEVEL", "INFO")
     color_default = os.getenv("NO_COLOR") is None
+    tokens = _csv("FREEBUFF_TOKENS", "")
+    if not tokens:
+        single = os.getenv("FREEBUFF_TOKEN") or os.getenv("CODEBUFF_TOKEN")
+        if single:
+            tokens = (single,)
     return Settings(
-        codebuff_token=os.getenv("FREEBUFF_TOKEN") or os.getenv("CODEBUFF_TOKEN"),
+        codebuff_tokens=tokens,
         local_api_key=os.getenv("FREEBUFF_API_KEY") or os.getenv("OPENAI_API_KEY"),
         codebuff_base_url=os.getenv("CODEBUFF_BASE_URL", "https://www.codebuff.com"),
         zeroclick_base_url=os.getenv("ZEROCLICK_BASE_URL", "https://zeroclick.dev"),

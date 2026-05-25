@@ -8,7 +8,7 @@ class QueuedSessionClient(CodebuffClient):
     def __init__(self) -> None:
         super().__init__(
             Settings(
-                codebuff_token="token",
+                codebuff_tokens=("token",),
                 local_api_key=None,
                 request_timeout=1,
             )

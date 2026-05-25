@@ -47,7 +47,7 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         client = SwitchModelClient()
         manager = SessionManager(
             client,
-            Settings(codebuff_token="token", local_api_key=None),
+            Settings(codebuff_tokens=("token",), local_api_key=None),
         )
 
         session = await manager.ensure_session("moonshotai/kimi-k2.6")
