@@ -2,11 +2,9 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
+COPY . .
 
 RUN uv sync --frozen --no-dev
-
-COPY . .
 
 EXPOSE 8000
 
