@@ -292,15 +292,15 @@ class CodebuffClient:
         }
         if surface:
             body["surface"] = surface
-            return await self._json(
-                "POST",
-                "/api/v1/ads",
-                body=body,
-                headers=self._headers(
-                    json_body=True,
-                    user_agent="Freebuff-CLI/0.0.95",
-                ),
-            )
+        return await self._json(
+            "POST",
+            "/api/v1/ads",
+            body=body,
+            headers=self._headers(
+                json_body=True,
+                user_agent="Freebuff-CLI/0.0.95",
+            ),
+        )
 
     async def request_ad_chain(
         self,
