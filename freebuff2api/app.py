@@ -167,6 +167,7 @@ async def chat_completions(request: Request) -> Any:
         response = await _collect_completion(client, settings, payload, run, model)
         return JSONResponse(response)
     except Exception as error:
+        logger.warning("chat completion failed: %s", error)
         return _error_response(error)
 
 
@@ -271,17 +272,17 @@ async def _start_child_chat_run_chain(
     assert parent_agent_id is not None
     started_at = utc_now_iso()
     parent_run_id = await client.start_run(parent_agent_id)
-    await client.record_run_step(
-        parent_run_id,
-        step_number=1,
-        child_run_ids=[],
-        message_id=None,
-        start_time=started_at,
+    chat_started_at = utc_now_iso()
+    chat_run_id = await client.start_run(
+        model.agent_id,
+        ancestor_run_ids=[parent_run_id],
     )
     return FreebuffRun(
         run_id=parent_run_id,
         agent_id=parent_agent_id,
         started_at=started_at,
+        chat_run_id=chat_run_id,
+        chat_started_at=chat_started_at,
     )
 
 
