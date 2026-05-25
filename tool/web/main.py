@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import time
 import urllib.parse
@@ -9,9 +10,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+load_dotenv()
+
 BASE_FREEBUFF = "https://freebuff.com"
 BASE_CODEBUFF = "https://www.codebuff.com"
 VERIFY_URL = "https://www.codebuff.com/api/v1/freebuff/session"
@@ -30,8 +35,25 @@ def _endpoints(mode: str) -> tuple[str, str]:
     return f"{base}/api/auth/cli/code", f"{base}/api/auth/cli/status"
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _proxy_url() -> str | None:
+    if not _env_bool("FREEBUFF_PROXY_ENABLED", False):
+        return None
+    return (os.getenv("FREEBUFF_PROXY_URL") or "").strip() or None
+
+
+def _http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(proxy=_proxy_url(), trust_env=False)
+
+
 async def _request_code(fingerprint_id: str, code_url: str) -> dict[str, Any]:
-    async with httpx.AsyncClient() as client:
+    async with _http_client() as client:
         resp = await client.post(
             code_url,
             json={"fingerprintId": fingerprint_id},
@@ -63,7 +85,7 @@ async def _poll_status_sse(
     deadline = time.monotonic() + 5 * 60
     attempt = 0
 
-    async with httpx.AsyncClient() as client:
+    async with _http_client() as client:
         while time.monotonic() < deadline:
             attempt += 1
             try:
@@ -195,7 +217,7 @@ async def verify_token_endpoint(request: Request):
     if not token:
         return {"ok": False, "info": "missing token"}
 
-    async with httpx.AsyncClient() as client:
+    async with _http_client() as client:
         try:
             resp = await client.get(
                 VERIFY_URL,

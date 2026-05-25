@@ -9,7 +9,7 @@ from .models import resolve_model
 
 
 def model_id(requested: str | None = None) -> str:
-    return resolve_model(requested).id
+    return resolve_model(requested).upstream_id
 
 
 def build_upstream_payload(
@@ -19,9 +19,10 @@ def build_upstream_payload(
     run_id: str,
     client_id: str,
     trace_session_id: str | None = None,
+    upstream_model_id: str | None = None,
 ) -> dict[str, Any]:
     payload = dict(body)
-    payload["model"] = model_id(payload.get("model"))
+    payload["model"] = upstream_model_id or model_id(payload.get("model"))
     payload["stream"] = True
     payload.setdefault("stop", ['"cb_easp"'])
 

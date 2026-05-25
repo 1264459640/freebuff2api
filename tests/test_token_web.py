@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from tool.web.main import app
+from tool.web.main import _proxy_url, app
 
 
 class TokenWebTests(unittest.TestCase):
@@ -27,6 +28,25 @@ class TokenWebTests(unittest.TestCase):
         response = TestClient(app).post("/api/start", json={"mode": "other"})
 
         self.assertEqual(response.status_code, 400)
+
+    def test_web_tool_uses_proxy_only_when_enabled(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "FREEBUFF_PROXY_ENABLED": "false",
+                "FREEBUFF_PROXY_URL": "http://127.0.0.1:7890",
+            },
+        ):
+            self.assertIsNone(_proxy_url())
+
+        with patch.dict(
+            "os.environ",
+            {
+                "FREEBUFF_PROXY_ENABLED": "true",
+                "FREEBUFF_PROXY_URL": "http://127.0.0.1:7890",
+            },
+        ):
+            self.assertEqual(_proxy_url(), "http://127.0.0.1:7890")
 
 
 if __name__ == "__main__":

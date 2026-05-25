@@ -24,6 +24,8 @@ class Settings:
     log_level: str = "INFO"
     log_body_chars: int = 2000
     log_color: bool = True
+    proxy_enabled: bool = False
+    proxy_url: str | None = None
     timezone: str = "Asia/Shanghai"
     locale: str = "zh-CN"
     os_name: str = "windows"
@@ -46,6 +48,14 @@ class Settings:
     @property
     def zeroclick_api_url(self) -> str:
         return self.zeroclick_base_url.rstrip("/")
+
+    @property
+    def upstream_proxy_url(self) -> str | None:
+        if not self.proxy_enabled:
+            return None
+        if not self.proxy_url:
+            return None
+        return self.proxy_url.strip() or None
 
 
 def _csv(name: str, default: str) -> tuple[str, ...]:
@@ -89,6 +99,8 @@ def load_settings() -> Settings:
         log_level=log_level,
         log_body_chars=_int("FREEBUFF_LOG_BODY_CHARS", 0 if debug else 2000),
         log_color=_bool("FREEBUFF_LOG_COLOR", color_default),
+        proxy_enabled=_bool("FREEBUFF_PROXY_ENABLED", False),
+        proxy_url=os.getenv("FREEBUFF_PROXY_URL"),
         timezone=os.getenv("FREEBUFF_TIMEZONE", "Asia/Shanghai"),
         locale=os.getenv("FREEBUFF_LOCALE", "zh-CN"),
         os_name=os.getenv("FREEBUFF_OS", "windows"),

@@ -1,0 +1,43 @@
+import unittest
+from unittest.mock import patch
+
+from freebuff2api.config import Settings, load_settings
+
+
+class ConfigTests(unittest.TestCase):
+    def test_proxy_url_is_ignored_when_proxy_is_disabled(self) -> None:
+        settings = Settings(
+            codebuff_token="token",
+            local_api_key=None,
+            proxy_enabled=False,
+            proxy_url="http://127.0.0.1:7890",
+        )
+
+        self.assertIsNone(settings.upstream_proxy_url)
+
+    def test_proxy_url_is_used_when_proxy_is_enabled(self) -> None:
+        settings = Settings(
+            codebuff_token="token",
+            local_api_key=None,
+            proxy_enabled=True,
+            proxy_url=" http://127.0.0.1:7890 ",
+        )
+
+        self.assertEqual(settings.upstream_proxy_url, "http://127.0.0.1:7890")
+
+    def test_load_settings_reads_proxy_toggle_and_url(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "FREEBUFF_PROXY_ENABLED": "true",
+                "FREEBUFF_PROXY_URL": "socks5://127.0.0.1:1080",
+            },
+        ):
+            settings = load_settings()
+
+        self.assertTrue(settings.proxy_enabled)
+        self.assertEqual(settings.upstream_proxy_url, "socks5://127.0.0.1:1080")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -23,7 +23,7 @@ from .openai_compat import (
     build_upstream_payload,
     sanitize_stream_chunk,
 )
-from .models import CONTEXT_PRUNER_AGENT_ID, models_response, resolve_model
+from .models import CONTEXT_PRUNER_AGENT_ID, FreebuffModel, models_response, resolve_model
 from .sse import decode_sse_data, encode_sse
 
 
@@ -124,14 +124,15 @@ async def chat_completions(request: Request) -> Any:
         )
         await client.validate_agents()
         await client.request_ad_chain(messages=body.get("messages"))
-        run = await _start_freebuff_run_chain(client, model_config.agent_id)
+        run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
         payload = build_upstream_payload(
             body,
             session=session,
-            run_id=run.run_id,
+            run_id=run.payload_run_id,
             client_id=settings.client_id,
             trace_session_id=trace_session_id,
+            upstream_model_id=model_config.upstream_id,
         )
         if settings.debug:
             logger.debug(
@@ -140,6 +141,13 @@ async def chat_completions(request: Request) -> Any:
                 run,
                 render_debug(payload, settings.log_body_chars),
             )
+    except CodebuffError as error:
+        logger.warning(
+            "failed to prepare chat completion: %s",
+            error,
+            exc_info=settings.debug,
+        )
+        return _error_response(error)
     except Exception as error:
         logger.exception("failed to prepare chat completion")
         return _error_response(error)
@@ -198,6 +206,23 @@ async def _stream_openai_chunks(
                     "chat stream ignored data=%s",
                     render_debug(data, settings.log_body_chars),
                 )
+    except CodebuffError as error:
+        logger.warning(
+            "chat stream failed run_id=%s: %s",
+            run.run_id,
+            error,
+            exc_info=settings.debug,
+        )
+        yield encode_sse(
+            {
+                "error": {
+                    "message": str(error),
+                    "type": "upstream_error",
+                    "code": "codebuff_error",
+                }
+            }
+        )
+        yield encode_sse("[DONE]")
     finally:
         _schedule_finalize_run(client, run, message_id)
 
@@ -240,8 +265,14 @@ async def _collect_completion(
 
 async def _start_freebuff_run_chain(
     client: CodebuffClient,
-    agent_id: str,
+    model: FreebuffModel | str,
 ) -> FreebuffRun:
+    if isinstance(model, str):
+        model = FreebuffModel(model, model)
+    if model.parent_agent_id:
+        return await _start_child_chat_run_chain(client, model)
+
+    agent_id = model.agent_id
     started_at = utc_now_iso()
     run_id = await client.start_run(agent_id)
     child_started_at = utc_now_iso()
@@ -302,6 +333,26 @@ async def _finalize_run_with_client(
             message_id,
             run.started_at,
         )
+        if run.chat_run_id and run.chat_run_id != run.run_id:
+            await client.record_run_step(
+                run.chat_run_id,
+                step_number=1,
+                child_run_ids=[],
+                message_id=message_id,
+                start_time=run.chat_started_at or run.started_at,
+            )
+            await client.finish_run(run.chat_run_id, total_steps=2)
+            await client.record_run_step(
+                run.run_id,
+                step_number=1,
+                child_run_ids=[run.chat_run_id],
+                message_id=None,
+                start_time=run.started_at,
+            )
+            await client.finish_run(run.run_id, total_steps=2)
+            logger.debug("finalize parent/child run done run_id=%s", run.run_id)
+            return
+
         await client.record_run_step(
             run.run_id,
             step_number=2,
@@ -311,5 +362,12 @@ async def _finalize_run_with_client(
         )
         await client.finish_run(run.run_id, total_steps=3)
         logger.debug("finalize run done run_id=%s", run.run_id)
+    except CodebuffError as error:
+        logger.warning(
+            "finalize run failed run_id=%s: %s",
+            run.run_id,
+            error,
+            exc_info=client.settings.debug,
+        )
     except Exception:
         logger.exception("finalize run failed run_id=%s", run.run_id)

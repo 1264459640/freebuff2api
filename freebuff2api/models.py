@@ -8,6 +8,17 @@ class FreebuffModel:
     id: str
     agent_id: str
     owned_by: str = "freebuff"
+    upstream_model_id: str | None = None
+    session_model_id: str | None = None
+    parent_agent_id: str | None = None
+
+    @property
+    def upstream_id(self) -> str:
+        return self.upstream_model_id or self.id
+
+    @property
+    def session_id(self) -> str:
+        return self.session_model_id or self.upstream_id
 
 
 FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
@@ -19,12 +30,42 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
 
 DEFAULT_MODEL = FREEBUFF_MODELS[0]
 CONTEXT_PRUNER_AGENT_ID = "context-pruner"
+GEMINI_THINKER_AGENT_ID = "thinker-with-files-gemini"
+GEMINI_THINKER_PARENT_AGENT_ID = "base2-free-kimi"
+GEMINI_THINKER_PARENT_MODEL_ID = "moonshotai/kimi-k2.6"
+GEMINI_FLASH_LITE_SESSION_MODEL_ID = DEFAULT_MODEL.id
+
+GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
+    FreebuffModel(
+        "google/gemini-2.5-flash-lite",
+        "file-picker",
+        owned_by="google",
+        session_model_id=GEMINI_FLASH_LITE_SESSION_MODEL_ID,
+        parent_agent_id=DEFAULT_MODEL.agent_id,
+    ),
+    FreebuffModel(
+        "google/gemini-3.1-flash-lite-preview",
+        "file-picker-max",
+        owned_by="google",
+        session_model_id=GEMINI_FLASH_LITE_SESSION_MODEL_ID,
+        parent_agent_id=DEFAULT_MODEL.agent_id,
+    ),
+    FreebuffModel(
+        "google/gemini-3.1-pro-preview",
+        GEMINI_THINKER_AGENT_ID,
+        owned_by="google",
+        session_model_id=GEMINI_THINKER_PARENT_MODEL_ID,
+        parent_agent_id=GEMINI_THINKER_PARENT_AGENT_ID,
+    ),
+)
+
+ALL_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
 
 
 def resolve_model(requested: str | None) -> FreebuffModel:
     if not requested:
         return DEFAULT_MODEL
-    for model in FREEBUFF_MODELS:
+    for model in ALL_MODELS:
         if model.id == requested:
             return model
     raise ValueError(f"Unsupported Freebuff model: {requested}")
@@ -40,28 +81,28 @@ def models_response() -> dict[str, object]:
                 "created": 0,
                 "owned_by": model.owned_by,
             }
-            for model in FREEBUFF_MODELS
+            for model in ALL_MODELS
         ],
     }
 
 
 def agent_validation_payload() -> dict[str, object]:
-    unique_agents = []
-    seen_agent_ids: set[str] = set()
-    for model in FREEBUFF_MODELS:
-        if model.agent_id in seen_agent_ids:
-            continue
-        seen_agent_ids.add(model.agent_id)
-        unique_agents.append(model)
+    models_by_agent: dict[str, FreebuffModel] = {}
+    spawnable_by_agent: dict[str, set[str]] = {}
+    for model in ALL_MODELS:
+        models_by_agent.setdefault(model.agent_id, model)
+        spawnable_by_agent.setdefault(model.agent_id, set()).add(CONTEXT_PRUNER_AGENT_ID)
+        if model.parent_agent_id:
+            spawnable_by_agent.setdefault(model.parent_agent_id, set()).add(model.agent_id)
 
     definitions = [
         _agent_definition(
             agent_id=model.agent_id,
-            model_id=model.id,
-            display_name=f"Freebuff {model.id}",
-            spawnable_agents=[CONTEXT_PRUNER_AGENT_ID],
+            model_id=model.upstream_id,
+            display_name=f"Freebuff {model.upstream_id}",
+            spawnable_agents=sorted(spawnable_by_agent.get(model.agent_id, set())),
         )
-        for model in unique_agents
+        for model in models_by_agent.values()
     ]
     definitions.append(
         _agent_definition(
