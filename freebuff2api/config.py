@@ -24,6 +24,8 @@ class Settings:
     log_level: str = "INFO"
     log_body_chars: int = 2000
     log_color: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8000
     proxy_enabled: bool = False
     proxy_url: str | None = None
     timezone: str = "Asia/Shanghai"
@@ -56,6 +58,13 @@ class Settings:
         if not self.proxy_url:
             return None
         return self.proxy_url.strip() or None
+
+    @property
+    def codebuff_tokens(self) -> tuple[str, ...]:
+        if not self.codebuff_token:
+            return ()
+        values = [item.strip() for item in self.codebuff_token.split(",")]
+        return tuple(item for item in values if item)
 
 
 def _csv(name: str, default: str) -> tuple[str, ...]:
@@ -99,6 +108,8 @@ def load_settings() -> Settings:
         log_level=log_level,
         log_body_chars=_int("FREEBUFF_LOG_BODY_CHARS", 0 if debug else 2000),
         log_color=_bool("FREEBUFF_LOG_COLOR", color_default),
+        host=os.getenv("FREEBUFF_HOST", "0.0.0.0"),
+        port=_int("FREEBUFF_PORT", 8000),
         proxy_enabled=_bool("FREEBUFF_PROXY_ENABLED", False),
         proxy_url=os.getenv("FREEBUFF_PROXY_URL"),
         timezone=os.getenv("FREEBUFF_TIMEZONE", "Asia/Shanghai"),

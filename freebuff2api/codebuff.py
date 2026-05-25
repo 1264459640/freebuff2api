@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
@@ -12,6 +12,7 @@ import httpx
 from .config import Settings
 from .logging_config import redact_headers, render_debug
 from .models import agent_validation_payload
+
 
 logger = logging.getLogger("freebuff2api.codebuff")
 
@@ -48,10 +49,22 @@ class FreebuffRun:
         return self.chat_run_id or self.run_id
 
 
+@dataclass
+class FreebuffSessionLease:
+    session: FreebuffSession
+    _lock: asyncio.Lock
+    _closed: bool = False
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._lock.release()
+
+
 class CodebuffClient:
-    def __init__(self, settings: Settings, token: str | None = None) -> None:
+    def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._token = token
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.request_timeout, read=None),
             follow_redirects=True,
@@ -72,8 +85,7 @@ class CodebuffClient:
         require_auth: bool = True,
         extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        token = self._token or self.settings.codebuff_token
-        if require_auth and not token:
+        if require_auth and not self.settings.codebuff_token:
             raise CodebuffError("FREEBUFF_TOKEN or CODEBUFF_TOKEN is required", 500)
 
         headers = {
@@ -81,7 +93,7 @@ class CodebuffClient:
             "User-Agent": user_agent,
         }
         if require_auth:
-            headers["Authorization"] = f"Bearer {token}"
+            headers["Authorization"] = f"Bearer {self.settings.codebuff_token}"
         if json_body:
             headers["Content-Type"] = "application/json"
         if extra:
@@ -124,17 +136,7 @@ class CodebuffClient:
             raise _upstream_error(response)
         if not response.content:
             return {}
-
-        # 2. 安全解析 JSON，且强制要求必须是字典格式 (dict)
-        try:
-            data = response.json()
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-
-        # 3. 兜底返回空字典，防止上一级静态检查报错，也防止业务代码报错
-        return {}
+        return response.json()
 
     async def validate_agents(self) -> None:
         if self._agents_validated:
@@ -254,34 +256,9 @@ class CodebuffClient:
         messages: list[dict[str, Any]] | None = None,
         surface: str | None = None,
     ) -> dict[str, Any]:
-        # 1. 预处理 messages，将数组类型的 content 转换为 string
-        cleaned_messages = []
-        if messages:
-            for msg in messages:
-                # 浅拷贝字典，避免修改原始请求体而影响后续的对话调用
-                msg_copy = dict(msg)
-                content = msg_copy.get("content")
-                if isinstance(content, list):
-                    # 如果 content 是数组（多模态格式，如 [{"type": "text", "text": "..."}]）
-                    text_parts = []
-                    for part in content:
-                        if isinstance(part, dict):
-                            text_val = part.get("text")
-                            if isinstance(text_val, str):
-                                text_parts.append(text_val)
-                        elif isinstance(part, str):
-                            text_parts.append(part)
-                    msg_copy["content"] = "".join(text_parts)
-                elif not isinstance(content, str) and content is not None:
-                    # 如果是其他非 string 的格式，强制转换为 string
-                    msg_copy["content"] = str(content)
-
-                    cleaned_messages.append(msg_copy)
-
-        # 2. 构造请求体，使用清洗后的 cleaned_messages
         body = {
             "provider": provider,
-"messages": _ad_messages(messages),
+            "messages": _ad_messages(messages),
             "sessionId": self.settings.session_id,
             "device": {
                 "os": self.settings.os_name,
@@ -480,9 +457,10 @@ class CodebuffClient:
                     )
                 if response.status_code >= 400:
                     text = await response.aread()
-                    raise CodebuffError(
-                        f"Codebuff chat failed: {response.status_code} {text[:500]!r}",
-                        502,
+                    raise _upstream_error(
+                        response,
+                        body=text,
+                        prefix="Codebuff chat failed",
                     )
                 async for line in response.aiter_lines():
                     if self.settings.debug:
@@ -508,64 +486,84 @@ class SessionManager:
         messages: list[dict[str, Any]] | None = None,
     ) -> FreebuffSession:
         async with self._lock:
-            cached = self._sessions.get(model)
-            if cached and cached.is_fresh:
-                try:
-                    data = await self.client.get_session(cached.instance_id)
-                    if data.get("status") == "active" and data.get("model") in {
-                        None,
-                        model,
-                    }:
-                        cached.remaining_ms = data.get("remainingMs")
-                        logger.debug(
-                            "reuse freebuff session model=%s instance_id=%s remaining_ms=%s",
-                            model,
-                            cached.instance_id,
-                            cached.remaining_ms,
-                        )
-                        return cached
-                    if data.get("status") == "active":
-                        logger.info(
-                            "cached freebuff session model mismatch cached=%s upstream=%s",
-                            model,
-                            data.get("model"),
-                        )
-                        self._sessions.pop(model, None)
-                except CodebuffError:
+            return await self._ensure_session_locked(model, messages)
+
+    async def acquire_session(
+        self,
+        model: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> FreebuffSessionLease:
+        await self._lock.acquire()
+        try:
+            session = await self._ensure_session_locked(model, messages)
+        except Exception:
+            self._lock.release()
+            raise
+        return FreebuffSessionLease(session=session, _lock=self._lock)
+
+    async def _ensure_session_locked(
+        self,
+        model: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> FreebuffSession:
+        cached = self._sessions.get(model)
+        if cached and cached.is_fresh:
+            try:
+                data = await self.client.get_session(cached.instance_id)
+                if data.get("status") == "active" and data.get("model") in {
+                    None,
+                    model,
+                }:
+                    cached.remaining_ms = data.get("remainingMs")
                     logger.debug(
-                        "cached freebuff session invalid model=%s instance_id=%s",
+                        "reuse freebuff session model=%s instance_id=%s remaining_ms=%s",
                         model,
                         cached.instance_id,
-                        exc_info=self.settings.debug,
+                        cached.remaining_ms,
+                    )
+                    return cached
+                if data.get("status") == "active":
+                    logger.info(
+                        "cached freebuff session model mismatch cached=%s upstream=%s",
+                        model,
+                        data.get("model"),
                     )
                     self._sessions.pop(model, None)
-
-            active_session = await self._delete_locked_session(model)
-            if active_session:
-                return active_session
-            await self.client.request_ad_chain(messages=[], surface="waiting_room")
-
-            try:
-                session = await self.client.create_session(model)
-            except CodebuffError as error:
-                if "model_locked" not in str(error):
-                    raise
-                logger.info(
-                    "freebuff session locked during create; delete and retry model=%s",
+            except CodebuffError:
+                logger.debug(
+                    "cached freebuff session invalid model=%s instance_id=%s",
                     model,
+                    cached.instance_id,
+                    exc_info=self.settings.debug,
                 )
-                await self.client.delete_session()
-                self._sessions.clear()
-                await self.client.request_ad_chain(messages=[], surface="waiting_room")
-                session = await self.client.create_session(model)
-            self._sessions[model] = session
-            logger.debug(
-                "created freebuff session model=%s instance_id=%s remaining_ms=%s",
+                self._sessions.pop(model, None)
+
+        active_session = await self._delete_locked_session(model)
+        if active_session:
+            return active_session
+        await self.client.request_ad_chain(messages=[], surface="waiting_room")
+
+        try:
+            session = await self.client.create_session(model)
+        except CodebuffError as error:
+            if "model_locked" not in str(error):
+                raise
+            logger.info(
+                "freebuff session locked during create; delete and retry model=%s",
                 model,
-                session.instance_id,
-                session.remaining_ms,
             )
-            return session
+            await self.client.delete_session()
+            self._sessions.clear()
+            await self.client.request_ad_chain(messages=[], surface="waiting_room")
+            session = await self.client.create_session(model)
+        self._sessions[model] = session
+        logger.debug(
+            "created freebuff session model=%s instance_id=%s remaining_ms=%s",
+            model,
+            session.instance_id,
+            session.remaining_ms,
+        )
+        return session
 
     async def _delete_locked_session(
         self,
@@ -616,40 +614,111 @@ class SessionManager:
 
 
 @dataclass
-class TokenSlot:
+class CodebuffAccount:
     client: CodebuffClient
     sessions: SessionManager
+    busy: bool = False
 
 
-class TokenPool:
-    def __init__(self, tokens: tuple[str, ...], settings: Settings) -> None:
-        self._slots: list[TokenSlot] = []
-        for token in tokens:
-            client = CodebuffClient(settings, token=token)
-            sessions = SessionManager(client, settings)
-            self._slots.append(TokenSlot(client=client, sessions=sessions))
-        self._next = 0
-        self._lock = asyncio.Lock()
-
-    async def acquire(self) -> TokenSlot:
-        async with self._lock:
-            slot = self._slots[self._next]
-            self._next = (self._next + 1) % len(self._slots)
-            return slot
+@dataclass
+class CodebuffAccountLease:
+    client: CodebuffClient
+    session: FreebuffSession
+    _session_lease: FreebuffSessionLease
+    _pool: CodebuffAccountPool
+    _account_index: int
+    _closed: bool = False
 
     async def aclose(self) -> None:
-        for slot in self._slots:
-            await slot.client.aclose()
+        if self._closed:
+            return
+        self._closed = True
+        await self._session_lease.aclose()
+        await self._pool.release(self._account_index)
+
+
+class CodebuffAccountPool:
+    def __init__(self, settings: Settings) -> None:
+        tokens = settings.codebuff_tokens or (None,)
+        self._accounts: list[CodebuffAccount] = []
+        for token in tokens:
+            account_settings = replace(settings, codebuff_token=token)
+            client = CodebuffClient(account_settings)
+            self._accounts.append(
+                CodebuffAccount(
+                    client=client,
+                    sessions=SessionManager(client, account_settings),
+                )
+            )
+        self._next_index = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def account_count(self) -> int:
+        return len(self._accounts)
+
+    @property
+    def default_client(self) -> CodebuffClient:
+        return self._accounts[0].client
+
+    @property
+    def default_sessions(self) -> SessionManager:
+        return self._accounts[0].sessions
+
+    async def aclose(self) -> None:
+        await asyncio.gather(
+            *(account.client.aclose() for account in self._accounts),
+            return_exceptions=True,
+        )
+
+    async def acquire_session(
+        self,
+        model: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> CodebuffAccountLease:
+        account_index = await self._reserve_account()
+        account = self._accounts[account_index]
+        try:
+            session_lease = await account.sessions.acquire_session(model, messages)
+        except Exception:
+            await self.release(account_index)
+            raise
+        return CodebuffAccountLease(
+            client=account.client,
+            session=session_lease.session,
+            _session_lease=session_lease,
+            _pool=self,
+            _account_index=account_index,
+        )
+
+    async def release(self, account_index: int) -> None:
+        async with self._condition:
+            self._accounts[account_index].busy = False
+            self._condition.notify(1)
+
+    async def _reserve_account(self) -> int:
+        async with self._condition:
+            while True:
+                account_index = self._next_available_index()
+                if account_index is not None:
+                    self._accounts[account_index].busy = True
+                    self._next_index = (account_index + 1) % len(self._accounts)
+                    return account_index
+                await self._condition.wait()
+
+    def _next_available_index(self) -> int | None:
+        account_count = len(self._accounts)
+        for offset in range(account_count):
+            account_index = (self._next_index + offset) % account_count
+            if not self._accounts[account_index].busy:
+                return account_index
+        return None
 
 
 def utc_now_iso() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace(
-            "+00:00",
-            "Z",
-        )
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00",
+        "Z",
     )
 
 
@@ -669,11 +738,29 @@ def _network_error(method: str, url: str, error: httpx.RequestError) -> Codebuff
     )
 
 
-def _upstream_error(response: httpx.Response) -> CodebuffError:
-    text = response.text[:500]
+def _upstream_error(
+    response: httpx.Response,
+    *,
+    body: bytes | None = None,
+    prefix: str = "Codebuff request failed",
+) -> CodebuffError:
+    raw_text = (
+        body.decode("utf-8", errors="replace")
+        if body is not None
+        else response.text
+    )
+    text = raw_text[:500]
     if response.status_code == 409:
         try:
-            data = response.json()
+            data = (
+                response.json()
+                if body is None
+                else httpx.Response(
+                    response.status_code,
+                    content=body,
+                    headers=response.headers,
+                ).json()
+            )
         except ValueError:
             data = {}
         if data.get("error") == "session_model_mismatch":
@@ -685,7 +772,7 @@ def _upstream_error(response: httpx.Response) -> CodebuffError:
             )
 
     return CodebuffError(
-        f"Codebuff request failed: {response.status_code} {text}",
+        f"{prefix}: {response.status_code} {text}",
         502,
     )
 

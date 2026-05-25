@@ -2,6 +2,9 @@
 
 Codebuff Freebuff 的 OpenAI-compatible API
 
+<img width="480" height="1032" alt="image" src="https://github.com/user-attachments/assets/8a12f1ef-42ea-41eb-b47b-40d86550bbc9" />
+
+
 ## 接口
 
 - `GET /v1/models`
@@ -32,6 +35,13 @@ https://freebuff.071129.xyz/
 FREEBUFF_TOKEN=你的 Freebuff Bearer token
 ```
 
+多账号可用英文逗号分隔；并发请求会优先分配到空闲账号，避免单个
+Freebuff 账号的全局 active free session 被并发切模型请求互相覆盖：
+
+```dotenv
+FREEBUFF_TOKEN=token-a,token-b,token-c
+```
+
 复制 `.env.example` 为 `.env`，然后填写上游 token：
 
 ```powershell
@@ -50,6 +60,8 @@ FREEBUFF_DEBUG=false
 FREEBUFF_LOG_LEVEL=INFO
 FREEBUFF_LOG_BODY_CHARS=2000
 FREEBUFF_LOG_COLOR=true
+FREEBUFF_HOST=0.0.0.0
+FREEBUFF_PORT=8000
 ```
 
 ### 代理
