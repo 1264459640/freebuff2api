@@ -642,7 +642,7 @@ class CodebuffAccountPool:
         tokens = settings.codebuff_tokens or (None,)
         self._accounts: list[CodebuffAccount] = []
         for token in tokens:
-            account_settings = replace(settings, codebuff_token=token)
+            account_settings = replace(settings, codebuff_tokens=(token,) if token else ())
             client = CodebuffClient(account_settings)
             self._accounts.append(
                 CodebuffAccount(
