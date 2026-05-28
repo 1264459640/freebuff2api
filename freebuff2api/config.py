@@ -45,7 +45,7 @@ class Settings:
 
     @property
     def codebuff_api_url(self) -> str:
-        return self.codebuff_base_url.rstrip("/")
+        return self.codebuff_base_url.strip().rstrip("/")
 
     @property
     def zeroclick_api_url(self) -> str:
@@ -79,6 +79,14 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
+def _api_base_url() -> str:
+    return (
+        os.getenv("FREEBUFF_API_BASE_URL")
+        or os.getenv("CODEBUFF_BASE_URL")
+        or "https://www.codebuff.com"
+    )
+
+
 def load_settings() -> Settings:
     debug = _bool("FREEBUFF_DEBUG", False)
     log_level = "DEBUG" if debug else os.getenv("FREEBUFF_LOG_LEVEL", "INFO")
@@ -91,7 +99,7 @@ def load_settings() -> Settings:
     return Settings(
         codebuff_tokens=tokens,
         local_api_key=os.getenv("FREEBUFF_API_KEY") or os.getenv("OPENAI_API_KEY"),
-        codebuff_base_url=os.getenv("CODEBUFF_BASE_URL", "https://www.codebuff.com"),
+        codebuff_base_url=_api_base_url(),
         zeroclick_base_url=os.getenv("ZEROCLICK_BASE_URL", "https://zeroclick.dev"),
         session_id=os.getenv("FREEBUFF_SESSION_ID", str(uuid.uuid4())),
         client_id=os.getenv("FREEBUFF_CLIENT_ID", uuid.uuid4().hex[:11]),

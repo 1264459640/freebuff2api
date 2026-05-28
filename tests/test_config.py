@@ -38,6 +38,30 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(settings.proxy_enabled)
         self.assertEqual(settings.upstream_proxy_url, "socks5://127.0.0.1:1080")
 
+    def test_freebuff_api_base_url_overrides_legacy_codebuff_base_url(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "FREEBUFF_API_BASE_URL": " https://freebuff-api.example.test/ ",
+                "CODEBUFF_BASE_URL": "https://legacy.example.test",
+            },
+        ):
+            settings = load_settings()
+
+        self.assertEqual(settings.codebuff_api_url, "https://freebuff-api.example.test")
+
+    def test_legacy_codebuff_base_url_is_still_supported(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "CODEBUFF_BASE_URL": "https://legacy.example.test/",
+            },
+            clear=True,
+        ):
+            settings = load_settings()
+
+        self.assertEqual(settings.codebuff_api_url, "https://legacy.example.test")
+
     def test_codebuff_tokens_splits_comma_separated_tokens(self) -> None:
         settings = Settings(
             codebuff_token="token-a, token-b,,token-c ",

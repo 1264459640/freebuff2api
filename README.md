@@ -64,8 +64,6 @@ FREEBUFF_HOST=0.0.0.0
 FREEBUFF_PORT=8000
 ```
 
-### 代理
-
 默认不启用代理，所有上游请求直连，且不会读取系统 `HTTP_PROXY` / `HTTPS_PROXY`。
 
 需要让所有上游请求经过代理时，在 `.env` 中开启：
