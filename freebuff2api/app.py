@@ -138,8 +138,8 @@ async def chat_completions(request: Request) -> Any:
             messages=messages,
         )
         client = lease.client
-        await client.validate_agents()
         await client.request_ad_chain(messages=messages)
+        await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
         payload = build_upstream_payload(

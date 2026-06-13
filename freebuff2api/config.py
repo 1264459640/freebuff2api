@@ -10,6 +10,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+HAR_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     codebuff_tokens: tuple[str, ...] = ()
@@ -31,11 +38,6 @@ class Settings:
     timezone: str = "Asia/Shanghai"
     locale: str = "zh-CN"
     os_name: str = "windows"
-    browser_user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
 
     @property
     def codebuff_token(self) -> str | None:
@@ -116,9 +118,4 @@ def load_settings() -> Settings:
         timezone=os.getenv("FREEBUFF_TIMEZONE", "Asia/Shanghai"),
         locale=os.getenv("FREEBUFF_LOCALE", "zh-CN"),
         os_name=os.getenv("FREEBUFF_OS", "windows"),
-        browser_user_agent=os.getenv(
-            "FREEBUFF_BROWSER_UA",
-            Settings.browser_user_agent,
-        )
-        or Settings.browser_user_agent,
     )
